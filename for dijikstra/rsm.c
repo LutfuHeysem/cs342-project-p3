@@ -191,8 +191,10 @@ int rsm_destroy()
     shared_data = NULL;
     shm_unlink(SHM_NAME); // remove the shared memory segment
 
-    kill(0,SIGTERM);
-    exit(0);
+    // kill(0,SIGTERM);
+    // exit(0);
+
+    return 0;
 }
 
 /**
@@ -265,7 +267,8 @@ int rsm_process_ended()
     sem_post(&shared_data->mutex);
     //end critical section
 
-    exit(0);
+    // exit(0);
+    return 0;
 }
 
 /**
@@ -441,7 +444,7 @@ void rsm_print_state (char hmsg[])
 
     sem_wait(&shared_data->mutex);
 
-    printf("##########################\n");
+    printf("###########################\n");
     printf("%s\n", hmsg);
     printf("###########################\n");
 
@@ -499,7 +502,7 @@ void rsm_print_state (char hmsg[])
             printf("%d  ", shared_data->avoidance ? shared_data->NeedM[i][j] : 0);
         }
     }
-    printf("\n#######\n############\n");
+    printf("\n###########################\n");
 
     sem_post(&shared_data->mutex);
 }

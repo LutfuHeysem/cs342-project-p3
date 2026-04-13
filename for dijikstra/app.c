@@ -134,24 +134,35 @@ int main(int argc, char **argv)
     }
 
     count = 0;
-    while ( count < 4) {
+    int deadlock_found = 0;
+    while (count < 10) {
         sleep(1);
-        rsm_print_state("The current state");
+
+        rsm_print_state("The Current State of the System");
+
         ret = rsm_detection();
         if (ret > 0) {
-            printf ("deadlock detected, count=%d\n", ret);
-            rsm_print_state("state after deadlock");
+            printf("DEADLOCK DETECTED, count=%d\n", ret);
+            rsm_print_state("State after deadlock");
+            deadlock_found = 1;
             break;
         }
         count++;
     }
-    
- 
-    for (i = 0; i < NUMP; ++i) {
-            wait (NULL);
+
+    if (deadlock_found) {
+        printf("Deadlock found. Terminating group...\n");
+        rsm_print_state("State after deadlock");
+        rsm_destroy(); // Clean up SHM
+        kill(0, SIGTERM); // Kill deadlocked children
+        exit(0);
+    } else {
+        for (i = 0; i < NUMP; ++i) {
+            wait(NULL);
+        }
     }
 
-
-   rsm_destroy();
+    rsm_destroy();
+    return 0;
 }
 
