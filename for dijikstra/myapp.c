@@ -194,10 +194,12 @@ int main(int argc, char **argv) {
     if (deadlock_found) {
         printf("Terminating due to deadlock.\n");
         rsm_destroy();
+        fflush(stdout);
         kill(0, SIGTERM);
         exit(0);
     } else {
         printf("Simulation finished safely without deadlock.\n");
+        fflush(stdout);
         kill(0, SIGTERM);
     }
 
