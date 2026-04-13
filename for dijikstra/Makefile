@@ -1,7 +1,6 @@
 LIBS = -L. -lrsm -lpthread -lrt
 
-
-all: librsm.a  app
+all: librsm.a app myapp
 
 librsm.a:  rsm.c
 	gcc -Wall -c rsm.c
@@ -11,5 +10,8 @@ librsm.a:  rsm.c
 app: app.c librsm.a
 	gcc -Wall -o app app.c $(LIBS)
 
+myapp: myapp.c librsm.a
+	gcc -Wall -o myapp myapp.c $(LIBS)
+
 clean: 
-	rm -fr *.o *.a *~ a.out  app rsm.o rsm.a librsm.a
+	rm -fr *.o *.a *~ a.out app myapp rsm.o rsm.a librsm.a
