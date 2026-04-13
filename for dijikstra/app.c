@@ -134,13 +134,14 @@ int main(int argc, char **argv)
     }
 
     count = 0;
-    while ( count < 10) {
+    while ( count < 4) {
         sleep(1);
         rsm_print_state("The current state");
         ret = rsm_detection();
         if (ret > 0) {
             printf ("deadlock detected, count=%d\n", ret);
             rsm_print_state("state after deadlock");
+            break;
         }
         count++;
     }

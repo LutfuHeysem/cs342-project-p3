@@ -45,16 +45,52 @@ typedef struct {
 static shared_data_t *shared_data = NULL;
 static int my_apid = -1; // the apid of the current process, set in rsm_process_started
 
-
-static int is_safe_state() {
-
+// Helper to check if a request can be satisfied by current available resources
+static int can_satisfy(int request[], int available[]) {
+    for (int j = 0; j < shared_data->M; j++) {
+        if (request[j] > available[j]) return FALSE;
+    }
+    return TRUE;
 }
 
+// Banker's Algorithm: Safety Check
+static int is_safe_state() {
+    int Work[MAX_RT];
+    int Finish[MAX_PR];
 
+    // Initialize Work = Available
+    for (int j = 0; j < shared_data->M; j++) {
+        Work[j] = shared_data->AvailV[j];
+    }
 
-//..... definitions/variables .....
-//.....
-//.....
+    // Initialize Finish: if process is not active, treat as finished
+    for (int i = 0; i < shared_data->N; i++) {
+        Finish[i] = !shared_data->active[i];
+    }
+
+    int possible = TRUE;
+    while (possible) {
+        possible = FALSE;
+        for (int i = 0; i < shared_data->N; i++) {
+            if (!Finish[i]) {
+                if (can_satisfy(shared_data->NeedM[i], Work)) {
+                    // Simulate completion: release resources
+                    for (int j = 0; j < shared_data->M; j++) {
+                        Work[j] += shared_data->AllocationM[i][j];
+                    }
+                    Finish[i] = TRUE;
+                    possible = TRUE;
+                }
+            }
+        }
+    }
+
+    // If all processes can finish, state is safe
+    for (int i = 0; i < shared_data->N; i++) {
+        if (!Finish[i]) return FALSE;
+    }
+    return TRUE;
+}
 
 /**
  * called once by main process before forking children
@@ -229,42 +265,241 @@ int rsm_process_ended()
     sem_post(&shared_data->mutex);
     //end critical section
 
-    kill(0, SIGTERM); // kill all processes in the same process group, including itself
     exit(0);
 }
 
+/**
+ * called by each child process to submit its claim of maximum resources needed (only for avoidance)
+ */
+int rsm_claim(int claim[]) {
+    if (shared_data == NULL || !shared_data->avoidance) return -1;
 
-int rsm_claim (int claim[])
-{
-    int ret = 0;
-    return(ret);
+    sem_wait(&shared_data->mutex);
+    for (int j = 0; j < shared_data->M; j++) {
+        if (claim[j] > shared_data->ExistingV[j]) {
+            sem_post(&shared_data->mutex);
+            return -1; // Claim exceeds system limits
+        }
+        shared_data->MaxM[my_apid][j] = claim[j];
+        shared_data->NeedM[my_apid][j] = claim[j];
+    }
+    shared_data->claimCount++;
+    int all_claimed = (shared_data->claimCount == shared_data->N);
+    sem_post(&shared_data->mutex);
+
+    // Barrier: Wait until all processes have registered their claims
+    if (all_claimed) {
+        for (int i = 0; i < shared_data->N; i++) {
+            sem_post(&shared_data->procWait[i]);
+        }
+    } else {
+        sem_wait(&shared_data->procWait[my_apid]);
+    }
+    return 0;
 }
 
-int rsm_request (int request[])
-{
-    int ret = 0;
+
+/**
+ * called by each child process to request resources
+ * blocks if the request cannot be granted immediately
+ */
+int rsm_request(int request[]) {
+    if (shared_data == NULL) return -1;
+
+    sem_wait(&shared_data->mutex);
     
-    return(ret);
+    // Check if request is valid (doesn't exceed MaxDemand/Need)
+    for (int j = 0; j < shared_data->M; j++) {
+        if (shared_data->avoidance && request[j] > shared_data->NeedM[my_apid][j]) {
+            sem_post(&shared_data->mutex);
+            return -1;
+        }
+        shared_data->RequestM[my_apid][j] = request[j];
+    }
+
+    while (TRUE) {
+        if (can_satisfy(request, shared_data->AvailV)) {
+            int safe = TRUE;
+            if (shared_data->avoidance) {
+                // Tentative allocation for safety check
+                for (int j = 0; j < shared_data->M; j++) {
+                    shared_data->AvailV[j] -= request[j];
+                    shared_data->AllocationM[my_apid][j] += request[j];
+                    shared_data->NeedM[my_apid][j] -= request[j];
+                }
+
+                if (!is_safe_state()) {
+                    // Rollback tentative allocation
+                    for (int j = 0; j < shared_data->M; j++) {
+                        shared_data->AvailV[j] += request[j];
+                        shared_data->AllocationM[my_apid][j] -= request[j];
+                        shared_data->NeedM[my_apid][j] += request[j];
+                    }
+                    safe = FALSE;
+                }
+            } else {
+                // Non-avoidance: Just allocate if available
+                for (int j = 0; j < shared_data->M; j++) {
+                    shared_data->AvailV[j] -= request[j];
+                    shared_data->AllocationM[my_apid][j] += request[j];
+                }
+            }
+
+            if (safe) {
+                for (int j = 0; j < shared_data->M; j++) shared_data->RequestM[my_apid][j] = 0;
+                shared_data->blocked[my_apid] = FALSE;
+                sem_post(&shared_data->mutex);
+                return 0;
+            }
+        }
+
+        // Block process if unsafe or unavailable
+        shared_data->blocked[my_apid] = TRUE;
+        sem_post(&shared_data->mutex);
+        sem_wait(&shared_data->procWait[my_apid]); 
+        sem_wait(&shared_data->mutex); // Re-acquire mutex to check again
+    }
 }
 
 
-int rsm_release (int release[])
-{
-    int ret = 0;
+/**
+ * called by each child process to release resources
+ */
+int rsm_release(int release[]) {
+    if (shared_data == NULL) return -1;
 
-    return (ret);
+    sem_wait(&shared_data->mutex);
+    for (int j = 0; j < shared_data->M; j++) {
+        if (release[j] > shared_data->AllocationM[my_apid][j]) {
+            sem_post(&shared_data->mutex);
+            return -1; // Releasing more than allocated
+        }
+        shared_data->AvailV[j] += release[j];
+        shared_data->AllocationM[my_apid][j] -= release[j];
+        if (shared_data->avoidance) {
+            shared_data->NeedM[my_apid][j] += release[j];
+        }
+    }
+
+    // Wake up all blocked processes to re-check their conditions
+    for (int i = 0; i < shared_data->N; i++) {
+        if (shared_data->blocked[i]) {
+            sem_post(&shared_data->procWait[i]);
+        }
+    }
+    sem_post(&shared_data->mutex);
+    return 0;
 }
 
 
-int rsm_detection()
-{
-    int ret = 0;
-    
-    return (ret);
+/**
+ * called by each child process to detect deadlocks
+ */
+int rsm_detection() {
+    if (shared_data == NULL) return -1;
+
+    sem_wait(&shared_data->mutex);
+    int Work[MAX_RT];
+    int Finish[MAX_PR];
+
+    for (int j = 0; j < shared_data->M; j++) Work[j] = shared_data->AvailV[j];
+    for (int i = 0; i < shared_data->N; i++) {
+        // Finish[i] is true if process has no allocation
+        int has_allocation = FALSE;
+        for (int j = 0; j < shared_data->M; j++) {
+            if (shared_data->AllocationM[i][j] > 0) has_allocation = TRUE;
+        }
+        Finish[i] = !has_allocation;
+    }
+
+    int possible = TRUE;
+    while (possible) {
+        possible = FALSE;
+        for (int i = 0; i < shared_data->N; i++) {
+            if (!Finish[i] && can_satisfy(shared_data->RequestM[i], Work)) {
+                for (int j = 0; j < shared_data->M; j++) Work[j] += shared_data->AllocationM[i][j];
+                Finish[i] = TRUE;
+                possible = TRUE;
+            }
+        }
+    }
+
+    int count = 0;
+    for (int i = 0; i < shared_data->N; i++) {
+        if (!Finish[i] && shared_data->active[i]) count++;
+    }
+    sem_post(&shared_data->mutex);
+    return count;
 }
 
-
+/**
+ * called by each child process to print the current state of the system
+ */
 void rsm_print_state (char hmsg[])
 {
-    return;
+    if (shared_data == NULL) return;
+
+    sem_wait(&shared_data->mutex);
+
+    printf("##########################\n");
+    printf("%s\n", hmsg);
+    printf("###########################\n");
+
+    // 1. Exist Vector
+    printf("Exist:\n");
+    for (int j = 0; j < shared_data->M; j++) printf("R%d ", j);
+    printf("\n");
+    for (int j = 0; j < shared_data->M; j++) printf("%d  ", shared_data->ExistingV[j]);
+    printf("\n");
+
+    // 2. Available Vector
+    printf("Available:\n");
+    for (int j = 0; j < shared_data->M; j++) printf("R%d ", j);
+    printf("\n");
+    for (int j = 0; j < shared_data->M; j++) printf("%d  ", shared_data->AvailV[j]);
+    printf("\n");
+
+    // 3. Allocation Matrix
+    printf("Allocation:\n");
+    for (int j = 0; j < shared_data->M; j++) printf("   R%d", j);
+    for (int i = 0; i < shared_data->N; i++) {
+        printf("\nP%d: ", i);
+        for (int j = 0; j < shared_data->M; j++) printf("%d  ", shared_data->AllocationM[i][j]);
+    }
+    printf("\n");
+
+    // 4. Request Matrix
+    printf("Request:\n");
+    for (int j = 0; j < shared_data->M; j++) printf("   R%d", j);
+    for (int i = 0; i < shared_data->N; i++) {
+        printf("\nP%d: ", i);
+        for (int j = 0; j < shared_data->M; j++) printf("%d  ", shared_data->RequestM[i][j]);
+    }
+    printf("\n");
+
+    // 5. MaxDemand Matrix
+    printf("MaxDemand:\n");
+    for (int j = 0; j < shared_data->M; j++) printf("   R%d", j);
+    for (int i = 0; i < shared_data->N; i++) {
+        printf("\nP%d: ", i);
+        for (int j = 0; j < shared_data->M; j++) {
+            // If avoidance is disabled, values should be zero
+            printf("%d  ", shared_data->avoidance ? shared_data->MaxM[i][j] : 0);
+        }
+    }
+    printf("\n");
+
+    // 6. Need Matrix
+    printf("Need:\n");
+    for (int j = 0; j < shared_data->M; j++) printf("   R%d", j);
+    for (int i = 0; i < shared_data->N; i++) {
+        printf("\nP%d: ", i);
+        for (int j = 0; j < shared_data->M; j++) {
+            // If avoidance is disabled, values should be zero
+            printf("%d  ", shared_data->avoidance ? shared_data->NeedM[i][j] : 0);
+        }
+    }
+    printf("\n#######\n############\n");
+
+    sem_post(&shared_data->mutex);
 }
